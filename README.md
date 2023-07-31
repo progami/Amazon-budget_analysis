@@ -20,11 +20,11 @@ You can download this file from **Amazon Campaign Manager > Bulk Operations**. S
 
 You can configure the script by changing the values in the `configs` dictionary:
 
+- `NUM_DAYS` (IMPORTANT): The number of days over which to spread the total ad spend.
 - `MIN_SPEND_NORMAL_CAMPAIGNS`: Minimum daily spend for normal campaigns.
 - `MIN_SPEND_TESTER_CAMPAIGNS`: Minimum daily spend for tester campaigns.
 - `MIN_SPEND_SP_MANUAL_RANKING`: Minimum daily spend for SP Manual Ranking campaigns.
 - `CLICK_COUNT_THRESHOLD`: Minimum number of clicks to be considered a non-tester campaign.
-- `NUM_DAYS`: The number of days over which to spread the total ad spend.
 - `MAX_SPEND_SD`: Maximum daily spend for SD campaigns.
 - `MAX_SPEND_SB`: Maximum daily spend for SB campaigns.
 
