@@ -1,21 +1,50 @@
 import pandas as pd
+import os
 from datetime import datetime
 from tabulate import tabulate
 from openpyxl import load_workbook
 import warnings
 warnings.filterwarnings("ignore")
 
+# Folder names
+SCALE_INSIGHTS_FOLDER = 'ScaleInsights'
+BULK_FILES_FOLDER = 'bulk files'
+
+# File names
+SCALE_INSIGHTS_FILENAME_INPUT = 'AdGroupStats.csv'
+BULK_FILES_FILENAME_INPUT = 'bulk_file.xlsx'
+FILENAME_OUTPUT_SUFFIX = '_output'
+
+# Full paths (input and output)
+SCALE_INSIGHTS_INPUT_PATH = os.path.join(SCALE_INSIGHTS_FOLDER, SCALE_INSIGHTS_FILENAME_INPUT)
+BULK_FILES_INPUT_PATH = os.path.join(BULK_FILES_FOLDER, BULK_FILES_FILENAME_INPUT)
+SCALE_INSIGHTS_OUTPUT_PATH = os.path.join(SCALE_INSIGHTS_FOLDER, FILENAME_OUTPUT_SUFFIX + SCALE_INSIGHTS_FILENAME_INPUT)
+BULK_FILES_OUTPUT_PATH = os.path.join(BULK_FILES_FOLDER, FILENAME_OUTPUT_SUFFIX + BULK_FILES_FILENAME_INPUT)
+
+def create_folders():
+    os.makedirs(SCALE_INSIGHTS_FOLDER, exist_ok=True)
+    os.makedirs(BULK_FILES_FOLDER, exist_ok=True)
 
 configs = {
-    "MIN_SPEND_NORMAL_CAMPAIGNS": 1.5,
-    "MIN_SPEND_TESTER_CAMPAIGNS": 3.0,
-    "MIN_SPEND_SP_MANUAL_RANKING": 3.5,
-    "CLICK_COUNT_THRESHOLD": 10,
-    "NUM_DAYS": 30,
-    "MAX_SPEND_SD": 3.5,
-    "MAX_SPEND_SB": 3.5,
+    "SP": {
+        "MIN_SPEND": 1.5,
+        "MIN_SPEND_MANUAL_RANKING": 3.5,
+    },
+    "SB": {
+        "MIN_SPEND": 1,
+        "MAX_SPEND": 3.5,
+    },
+    "SD": {
+        "MIN_SPEND": 1,
+        "MAX_SPEND": 3.5,
+    },
+    "GENERAL": {
+        "click_threshold_tester": 5,
+        "MIN_SPEND_TESTER_CAMPAIGNS": 3.0,
+        "NUM_DAYS": 14,
+        "WEIGHTING_FACTOR": 1.5
+    }
 }
-
 
 def find_column(sheet, target_header):
     for cell in sheet[1]:
@@ -23,7 +52,7 @@ def find_column(sheet, target_header):
             return cell.column
 
 def update_bulk_file(df):
-    workbook = load_workbook('bulk_file.xlsx')
+    workbook = load_workbook(BULK_FILES_INPUT_PATH)
     budget_mapping = df.set_index('Campaign')['daily_spend'].to_dict()
     sheets_and_budget_headers = {
         'Sponsored Products Campaigns': 'Daily Budget',
@@ -44,14 +73,37 @@ def update_bulk_file(df):
                 campaign_name = row[campaign_name_col-1].value
                 if campaign_name in budget_mapping:
                     row[budget_col-1].value = budget_mapping[campaign_name]
+    
+    workbook.save(BULK_FILES_OUTPUT_PATH) # Save in the 'bulk files' directory
+    
+def load_and_preprocess_data():
+    
+    df = pd.read_csv(SCALE_INSIGHTS_INPUT_PATH)
 
-    workbook.save('updated_bulk_file.xlsx')
-
-
-def load_and_preprocess_data(filename):
-    df = pd.read_csv(filename)
     df.fillna(0, inplace=True)
     df = df.drop(columns=['Units', 'ROAS', 'Default Bid'])
+    return df
+
+def apply_constraints(df):
+    df = df[df['State'] != 'Archived'].copy()
+    df['%ad spend'] = df['%ad spend'].round(4)
+    df['%ad sales'] = df['%ad sales'].round(4)
+    df['distributed_spend'] = df['distributed_spend'].round(2)
+    df['daily_spend'] = df['daily_spend'].round(2)
+
+    for ctype in ['SP', 'SB', 'SD']:
+        cfg = configs[ctype]
+        rows = df['Type'].str.startswith(ctype)
+        df.loc[rows, 'daily_spend'] = df.loc[rows, 'daily_spend'].apply(lambda x: max(x, cfg['MIN_SPEND']))
+        if ctype in ['SB', 'SD']:
+            df.loc[rows, 'daily_spend'] = df.loc[rows, 'daily_spend'].apply(lambda x: min(x, cfg['MAX_SPEND']))
+
+    df.loc[(df['Type'] == 'SP Manual') & (df['AdGroup'] == 'Ranking'), 'daily_spend'] = df.loc[
+        (df['Type'] == 'SP Manual') & (df['AdGroup'] == 'Ranking'), 'daily_spend'].apply(lambda x: max(x, configs["SP"]["MIN_SPEND_MANUAL_RANKING"]))
+
+    df.loc[(df['Clicks'] < configs["GENERAL"]["click_threshold_tester"]) & (df['Type'].str.contains('SP')), 'daily_spend'] = df[
+        'daily_spend'].apply(lambda x: max(x, configs["GENERAL"]["MIN_SPEND_TESTER_CAMPAIGNS"]))
+
     return df
 
 def calculate_metrics(df):
@@ -61,35 +113,22 @@ def calculate_metrics(df):
     df['%ad spend'] = df['Spent'] / total_spend
     df['%ad sales'] = df['Sales'] / total_sales
 
-    df['distributed_spend'] = total_spend * df['%ad sales']
-    df['daily_spend'] = df['distributed_spend'] / configs["NUM_DAYS"]
-
-    return df
-
-def apply_constraints(df):
-    df = df[df['State'] == 'Enabled'].copy()
-    df['%ad spend'] = df['%ad spend'].round(4)
-    df['%ad sales'] = df['%ad sales'].round(4)
-    df['distributed_spend'] = df['distributed_spend'].round(2)
-    df['daily_spend'] = df['daily_spend'].round(2)
-
-    df['daily_spend'] = df['daily_spend'].apply(lambda x: max(x, configs["MIN_SPEND_NORMAL_CAMPAIGNS"]))
-    df.loc[(df['Type'] == 'SP Manual') & (df['AdGroup'] == 'Ranking'), 'daily_spend'] = df.loc[(df['Type'] == 'SP Manual') & (df['AdGroup'] == 'Ranking'), 'daily_spend'].apply(lambda x: max(x, configs["MIN_SPEND_SP_MANUAL_RANKING"]))
-
-    df.loc[df['Type'].str.startswith('SD'), 'daily_spend'] = df.loc[df['Type'].str.startswith('SD'), 'daily_spend'].apply(lambda x: min(x, configs["MAX_SPEND_SD"]))
-    df.loc[df['Type'].str.startswith('SB'), 'daily_spend'] = df.loc[df['Type'].str.startswith('SB'), 'daily_spend'].apply(lambda x: min(x, configs["MAX_SPEND_SB"]))
-
-    df.loc[(df['Clicks'] < configs["CLICK_COUNT_THRESHOLD"]) & (df['Type'].str.contains('SP')), 'daily_spend'] = df['daily_spend'].apply(lambda x: max(x, configs["MIN_SPEND_TESTER_CAMPAIGNS"]))
+    # Apply the weighting factor to campaigns with the AdGroup "Ranking"
+    df['weighted_ad_sales'] = df.apply(lambda x: x['%ad sales'] * configs['GENERAL']['WEIGHTING_FACTOR'] if x['AdGroup'] == 'Ranking' else x['%ad sales'], axis=1)
+    
+    # Distribute spend using the weighted percentage
+    df['distributed_spend'] = total_spend * df['weighted_ad_sales']
+    df['daily_spend'] = df['distributed_spend'] / configs["GENERAL"]["NUM_DAYS"]
 
     return df
 
 def calculate_and_print_results(df):
-    daily_tester_budget = df.loc[(df['Clicks'] < configs["CLICK_COUNT_THRESHOLD"]) & (df['Type'].str.contains('SP')), 'daily_spend'].sum()
-    daily_other_budget = df.loc[~((df['Clicks'] < configs["CLICK_COUNT_THRESHOLD"]) & (df['Type'].str.contains('SP'))), 'daily_spend'].sum()
+    daily_tester_budget = df.loc[(df['Clicks'] < configs["GENERAL"]["click_threshold_tester"]) & (df['Type'].str.contains('SP')), 'daily_spend'].sum()
+    daily_other_budget = df.loc[~((df['Clicks'] < configs["GENERAL"]["click_threshold_tester"]) & (df['Type'].str.contains('SP'))), 'daily_spend'].sum()
     total_daily_budget = df['daily_spend'].sum()
 
     total_spend = df['Spent'].sum()
-    total_initial_spend_daily = round(total_spend/configs['NUM_DAYS'], 2)
+    total_initial_spend_daily = round(total_spend/configs['GENERAL']['NUM_DAYS'], 2)
     percent_daily_tester_budget = (daily_tester_budget/total_initial_spend_daily)*100
     percent_daily_other_budget = (daily_other_budget/total_initial_spend_daily)*100
     percent_total_daily_budget = (total_daily_budget/total_initial_spend_daily)*100
@@ -101,49 +140,17 @@ def calculate_and_print_results(df):
         "Total daily budget": f"£{total_daily_budget} ({percent_total_daily_budget:.2f}%)"
     }
 
-    print("Results:")
-    print(tabulate(results.items(), headers=["Parameter", "Value"], tablefmt="pretty"))
+    print(tabulate(results.items(), tablefmt='plain'))
 
-def calculate_spend_percentage(df):
-    total_spend_daily = round(df['Spent'].sum() / configs["NUM_DAYS"], 1)
-
-    sp_spend_daily = round(df[df['Type'].str.startswith('SP')]['Spent'].sum() / configs["NUM_DAYS"], 1)
-    sb_spend_daily = round(df[df['Type'].str.startswith('SB')]['Spent'].sum() / configs["NUM_DAYS"], 1)
-    sd_spend_daily = round(df[df['Type'].str.startswith('SD')]['Spent'].sum() / configs["NUM_DAYS"], 1)
-
-    sp_spend_percentage = round((sp_spend_daily / total_spend_daily) * 100, 1)
-    sb_spend_percentage = round((sb_spend_daily / total_spend_daily) * 100, 1)
-    sd_spend_percentage = round((sd_spend_daily / total_spend_daily) * 100, 1)
-
-    spend_percentage = {
-        "Total Daily Spend": total_spend_daily,
-        "SP Daily Spend": sp_spend_daily,
-        "SB Daily Spend": sb_spend_daily,
-        "SD Daily Spend": sd_spend_daily,
-        "SP Spend %": sp_spend_percentage,
-        "SB Spend %": sb_spend_percentage,
-        "SD Spend %": sd_spend_percentage,
-    }
-
-    print("Daily Spend Percentages:")
-    print(tabulate(spend_percentage.items(), headers=["Parameter", "Value"], tablefmt="pretty"))
 
 def main():
-    print("Configurations:")
-    print(tabulate(configs.items(), headers=["Parameter", "Value"], tablefmt="pretty"))
 
-    df = load_and_preprocess_data('AdGroupStats.csv')
+    df = load_and_preprocess_data()
     df = calculate_metrics(df)
     df = apply_constraints(df)
-
-    output_path = 'UpdatedAdGroupStats.xlsx'
-    df.to_excel(output_path, index=False)
-    
-    update_bulk_file(df)
-    
-    calculate_spend_percentage(df)
     calculate_and_print_results(df)
-    
+    update_bulk_file(df)
+    df.to_csv(SCALE_INSIGHTS_OUTPUT_PATH, index=False) # Save in the 'ScaleInsights' directory
 
 if __name__ == "__main__":
     main()
